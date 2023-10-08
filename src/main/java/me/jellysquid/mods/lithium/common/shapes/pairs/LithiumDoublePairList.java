@@ -5,9 +5,7 @@ import it.unimi.dsi.fastutil.doubles.DoubleList;
 import net.minecraft.util.shape.PairList;
 
 /**
- * Optimized variant of {@link net.minecraft.util.shape.SimplePairList}. This implementation works directly against
- * flat arrays and tries to organize code in a manner that hits the JIT's happy path. In my testing, this is about
- * ~50% faster than the vanilla implementation.
+ * Optimized variant of {@link net.minecraft.util.shape.SimplePairList}.
  */
 public final class LithiumDoublePairList implements PairList {
     private final double[] merged;
@@ -17,7 +15,31 @@ public final class LithiumDoublePairList implements PairList {
     private final DoubleArrayList pairs;
 
     public LithiumDoublePairList(DoubleList aPoints, DoubleList bPoints, boolean flag1, boolean flag2) {
-        int size = aPoints.size() + bPoints.size();
+        double[] araw;
+
+        if (aPoints instanceof DoubleArrayList) {
+            araw = ((DoubleArrayList) aPoints).elements();
+        } else {
+            araw = new double[aPoints.size()];
+
+            for (int i = 0; i < araw.length; i++) {
+                araw[i] = aPoints.getDouble(i);
+            }
+        }
+
+        double[] braw;
+
+        if (bPoints instanceof DoubleArrayList) {
+            braw = ((DoubleArrayList) bPoints).elements();
+        } else {
+            braw = new double[bPoints.size()];
+
+            for (int i = 0; i < braw.length; i++) {
+                braw[i] = bPoints.getDouble(i);
+            }
+        }
+
+        int size = araw.length + braw.length;
 
         this.merged = new double[size];
         this.indicesFirst = new int[size];
@@ -25,7 +47,7 @@ public final class LithiumDoublePairList implements PairList {
 
         this.pairs = DoubleArrayList.wrap(this.merged);
 
-        this.merge(getArray(aPoints), getArray(bPoints), aPoints.size(), bPoints.size(), flag1, flag2);
+        this.merge(araw, braw, araw.length, braw.length, flag1, flag2);
     }
 
     private void merge(double[] aPoints, double[] bPoints, int aSize, int bSize, boolean flag1, boolean flag2) {
@@ -97,26 +119,7 @@ public final class LithiumDoublePairList implements PairList {
     }
 
     @Override
-    public int size() {
-        return this.pairs.size();
-    }
-
-    @Override
     public DoubleList getPairs() {
         return this.pairs;
-    }
-
-    private static double[] getArray(DoubleList list) {
-        if (list instanceof DoubleArrayList) {
-            return ((DoubleArrayList) list).elements();
-        }
-
-        double[] points = new double[list.size()];
-
-        for (int i = 0; i < points.length; i++) {
-            points[i] = list.getDouble(i);
-        }
-
-        return points;
     }
 }

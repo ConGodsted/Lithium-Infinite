@@ -1,80 +1,136 @@
 package me.jellysquid.mods.lithium.common.entity;
 
-import com.google.common.collect.AbstractIterator;
-import me.jellysquid.mods.lithium.common.entity.movement.ChunkAwareBlockCollisionSweeper;
-import me.jellysquid.mods.lithium.common.util.Pos;
-import me.jellysquid.mods.lithium.common.world.WorldHelper;
+import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.ShapeContext;
 import net.minecraft.entity.Entity;
 import net.minecraft.util.function.BooleanBiFunction;
+import net.minecraft.util.CuboidBlockIterator;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.shape.VoxelShape;
 import net.minecraft.util.shape.VoxelShapes;
+import net.minecraft.world.BlockView;
 import net.minecraft.world.CollisionView;
 import net.minecraft.world.EntityView;
-import net.minecraft.world.World;
 import net.minecraft.world.border.WorldBorder;
-import net.minecraft.world.chunk.Chunk;
-import net.minecraft.world.chunk.ChunkSection;
-import net.minecraft.world.chunk.ChunkStatus;
-import org.jetbrains.annotations.NotNull;
-import org.jetbrains.annotations.Nullable;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Iterator;
-import java.util.List;
+import java.util.*;
+import java.util.function.Consumer;
+import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
 
 public class LithiumEntityCollisions {
-    public static final double EPSILON = 1.0E-7D;
-
     /**
      * [VanillaCopy] CollisionView#getBlockCollisions(Entity, Box)
      * This is a much, much faster implementation which uses simple collision testing against full-cube block shapes.
      * Checks against the world border are replaced with our own optimized functions which do not go through the
      * VoxelShape system.
      */
-    public static List<VoxelShape> getBlockCollisions(World world, Entity entity, Box box) {
-        return new ChunkAwareBlockCollisionSweeper(world, entity, box).collectAll();
-    }
+    public static Stream<VoxelShape> getBlockCollisions(CollisionView world, final Entity entity, Box entityBox) {
+        int minX = MathHelper.floor(entityBox.x1 - 1.0E-7D) - 1;
+        int maxX = MathHelper.floor(entityBox.x2 + 1.0E-7D) + 1;
+        int minY = MathHelper.floor(entityBox.y1 - 1.0E-7D) - 1;
+        int maxY = MathHelper.floor(entityBox.y2 + 1.0E-7D) + 1;
+        int minZ = MathHelper.floor(entityBox.z1 - 1.0E-7D) - 1;
+        int maxZ = MathHelper.floor(entityBox.z2 + 1.0E-7D) + 1;
 
-    /***
-     * @return True if the box (possibly that of an entity's) collided with any blocks
-     */
-    public static boolean doesBoxCollideWithBlocks(World world, Entity entity, Box box) {
-        final ChunkAwareBlockCollisionSweeper sweeper = new ChunkAwareBlockCollisionSweeper(world, entity, box);
+        final ShapeContext context = entity == null ? ShapeContext.absent() : ShapeContext.of(entity);
+        final CuboidBlockIterator cuboidIt = new CuboidBlockIterator(minX, minY, minZ, maxX, maxY, maxZ);
+        final BlockPos.Mutable pos = new BlockPos.Mutable();
+        final VoxelShape entityShape = VoxelShapes.cuboid(entityBox);
 
-        final VoxelShape shape = sweeper.computeNext();
+        return StreamSupport.stream(new Spliterators.AbstractSpliterator<VoxelShape>(Long.MAX_VALUE, Spliterator.NONNULL | Spliterator.IMMUTABLE) {
+            boolean skipWorldBorderCheck = entity == null;
 
-        return shape != null && !shape.isEmpty();
+            public boolean tryAdvance(Consumer<? super VoxelShape> consumer) {
+                if (!this.skipWorldBorderCheck) {
+                    this.skipWorldBorderCheck = true;
+
+                    WorldBorder border = world.getWorldBorder();
+
+                    boolean isInsideBorder = LithiumEntityCollisions.isBoxFullyWithinWorldBorder(border, entity.getBoundingBox().contract(1.0E-7D));
+                    boolean isCrossingBorder = LithiumEntityCollisions.isBoxFullyWithinWorldBorder(border, entity.getBoundingBox().expand(1.0E-7D));
+
+                    if (!isInsideBorder && isCrossingBorder) {
+                        consumer.accept(border.asVoxelShape());
+
+                        return true;
+                    }
+                }
+
+                while (cuboidIt.step()) {
+                    int x = cuboidIt.getX();
+                    int y = cuboidIt.getY();
+                    int z = cuboidIt.getZ();
+
+                    int edgesHit = cuboidIt.getEdgeCoordinatesCount();
+
+                    if (edgesHit == 3) {
+                        continue;
+                    }
+
+                    BlockView chunk = world.getExistingChunk(x >> 4, z >> 4);
+
+                    if (chunk == null) {
+                        continue;
+                    }
+
+                    pos.set(x, y, z);
+
+                    BlockState state = chunk.getBlockState(pos);
+
+                    if (edgesHit == 1 && !state.exceedsCube()) {
+                        continue;
+                    }
+
+                    if (edgesHit == 2 && state.getBlock() != Blocks.MOVING_PISTON) {
+                        continue;
+                    }
+
+                    VoxelShape blockShape = state.getCollisionShape(world, pos, context);
+
+                    if (blockShape == VoxelShapes.empty()) {
+                        continue;
+                    }
+
+                    if (blockShape == VoxelShapes.fullCube()) {
+                        if (entityBox.intersects(x, y, z, x + 1.0D, y + 1.0D, z + 1.0D)) {
+                            consumer.accept(blockShape.offset(x, y, z));
+
+                            return true;
+                        }
+                    } else {
+                        VoxelShape shape = blockShape.offset(x, y, z);
+
+                        if (VoxelShapes.matchesAnywhere(shape, entityShape, BooleanBiFunction.AND)) {
+                            consumer.accept(shape);
+
+                            return true;
+                        }
+                    }
+                }
+
+                return false;
+            }
+        }, false);
     }
 
     /**
-     * @return True if the box (possibly that of an entity's) collided with any other hard entities
+     * This provides a faster check for seeing if an entity is within the world border as it avoids going through
+     * the slower shape system.
+     * @return True if the {@param box} is fully within the {@param border}, otherwise false.
      */
-    public static boolean doesBoxCollideWithHardEntities(EntityView view, Entity entity, Box box) {
-        if (isBoxEmpty(box)) {
-            return false;
-        }
+    public static boolean isBoxFullyWithinWorldBorder(WorldBorder border, Box box) {
+        double wboxMinX = Math.floor(border.getBoundWest());
+        double wboxMinZ = Math.floor(border.getBoundNorth());
 
-        return getEntityWorldBorderCollisionIterable(view, entity, box.expand(EPSILON), false).iterator().hasNext();
-    }
+        double wboxMaxX = Math.ceil(border.getBoundEast());
+        double wboxMaxZ = Math.ceil(border.getBoundSouth());
 
-    /**
-     * Iterates entity and world border collision boxes.
-     */
-    public static List<VoxelShape> getEntityWorldBorderCollisions(World world, Entity entity, Box box, boolean includeWorldBorder) {
-        if (isBoxEmpty(box)) {
-            return Collections.emptyList();
-        }
-        ArrayList<VoxelShape> shapes = new ArrayList<>();
-        Iterable<VoxelShape> collisions = getEntityWorldBorderCollisionIterable(world, entity, box.expand(EPSILON), includeWorldBorder);
-        for (VoxelShape shape : collisions) {
-            shapes.add(shape);
-        }
-        return shapes;
+        return box.x1 >= wboxMinX && box.x1 < wboxMaxX && box.z1 >= wboxMinZ && box.z1 < wboxMaxZ &&
+                box.x2 >= wboxMinX && box.x2 < wboxMaxX && box.z2 >= wboxMinZ && box.z2 < wboxMaxZ;
     }
 
     /**
@@ -82,122 +138,40 @@ public class LithiumEntityCollisions {
      * Re-implements the function named above without stream code or unnecessary allocations. This can provide a small
      * boost in some situations (such as heavy entity crowding) and reduces the allocation rate significantly.
      */
-    public static Iterable<VoxelShape> getEntityWorldBorderCollisionIterable(EntityView view, Entity entity, Box box, boolean includeWorldBorder) {
-        assert !includeWorldBorder || entity != null;
-        return new Iterable<>() {
-            private List<Entity> entityList;
-            private int nextFilterIndex;
+    public static Stream<VoxelShape> getEntityCollisions(EntityView view, Entity entity, Box box, Set<Entity> excluded) {
+        if (box.getAverageSideLength() < 1.0E-7D) {
+            return Stream.empty();
+        }
 
-            @NotNull
-            @Override
-            public Iterator<VoxelShape> iterator() {
-                return new AbstractIterator<>() {
-                    int index = 0;
-                    boolean consumedWorldBorder = false;
+        Box selection = box.expand(1.0E-7D);
 
-                    @Override
-                    protected VoxelShape computeNext() {
-                        //Initialize list that is shared between multiple iterators as late as possible
-                        if (entityList == null) {
-                            /*
-                             * In case entity's class is overriding Entity#collidesWith(Entity), all types of entities may be (=> are assumed to be) required.
-                             * Otherwise only get entities that override Entity#isCollidable(), as other entities cannot collide.
-                             */
-                            entityList = WorldHelper.getEntitiesForCollision(view, box, entity);
-                            nextFilterIndex = 0;
-                        }
-                        List<Entity> list = entityList;
-                        Entity otherEntity;
-                        do {
-                            if (this.index >= list.size()) {
-                                //get the world border at the end
-                                if (includeWorldBorder && !this.consumedWorldBorder) {
-                                    this.consumedWorldBorder = true;
-                                    WorldBorder worldBorder = entity.getWorld().getWorldBorder();
-                                    if (!isWithinWorldBorder(worldBorder, box) && isWithinWorldBorder(worldBorder, entity.getBoundingBox())) {
-                                        return worldBorder.asVoxelShape();
-                                    }
-                                }
-                                return this.endOfData();
-                            }
+        List<Entity> entities = view.getEntities(entity, selection);
+        List<VoxelShape> shapes = new ArrayList<>();
 
-                            otherEntity = list.get(this.index);
-                            if (this.index >= nextFilterIndex) {
-                                /*
-                                 * {@link Entity#isCollidable()} returns false by default, designed to be overridden by
-                                 * entities whose collisions should be "hard" (boats and shulkers, for now).
-                                 *
-                                 * {@link Entity#collidesWith(Entity)} only allows hard collisions if the calling entity is not riding
-                                 * otherEntity as a vehicle.
-                                 */
-                                if (entity == null) {
-                                    if (!otherEntity.isCollidable()) {
-                                        otherEntity = null;
-                                    }
-                                } else if (!entity.collidesWith(otherEntity)) {
-                                    otherEntity = null;
-                                }
-                                nextFilterIndex++;
-                            }
-                            this.index++;
-                        } while (otherEntity == null);
-
-                        return VoxelShapes.cuboid(otherEntity.getBoundingBox());
-                    }
-                };
+        for (Entity otherEntity : entities) {
+            if (!excluded.isEmpty() && excluded.contains(otherEntity)) {
+                continue;
             }
-        };
-    }
 
-    /**
-     * This provides a faster check for seeing if an entity is within the world border as it avoids going through
-     * the slower shape system.
-     *
-     * @return True if the {@param box} is fully within the {@param border}, otherwise false.
-     */
-    public static boolean isWithinWorldBorder(WorldBorder border, Box box) {
-        double wboxMinX = Math.floor(border.getBoundWest());
-        double wboxMinZ = Math.floor(border.getBoundNorth());
+            if (entity != null && entity.isConnectedThroughVehicle(otherEntity)) {
+                continue;
+            }
 
-        double wboxMaxX = Math.ceil(border.getBoundEast());
-        double wboxMaxZ = Math.ceil(border.getBoundSouth());
+            Box otherEntityBox = otherEntity.getCollisionBox();
 
-        return box.minX >= wboxMinX && box.minX <= wboxMaxX && box.minZ >= wboxMinZ && box.minZ <= wboxMaxZ &&
-                box.maxX >= wboxMinX && box.maxX <= wboxMaxX && box.maxZ >= wboxMinZ && box.maxZ <= wboxMaxZ;
-    }
+            if (otherEntityBox != null && selection.intersects(otherEntityBox)) {
+                shapes.add(VoxelShapes.cuboid(otherEntityBox));
+            }
 
+            if (entity != null) {
+                Box otherEntityHardBox = entity.getHardCollisionBox(otherEntity);
 
-    private static boolean isBoxEmpty(Box box) {
-        return box.getAverageSideLength() <= EPSILON;
-    }
-
-    public static boolean doesEntityCollideWithWorldBorder(CollisionView collisionView, Entity entity) {
-        if (isWithinWorldBorder(collisionView.getWorldBorder(), entity.getBoundingBox())) {
-            return false;
-        } else {
-            VoxelShape worldBorderShape = getWorldBorderCollision(collisionView, entity);
-            return worldBorderShape != null && VoxelShapes.matchesAnywhere(worldBorderShape, VoxelShapes.cuboid(entity.getBoundingBox()), BooleanBiFunction.AND);
+                if (otherEntityHardBox != null && selection.intersects(otherEntityHardBox)) {
+                    shapes.add(VoxelShapes.cuboid(otherEntityHardBox));
+                }
+            }
         }
-    }
 
-    public static VoxelShape getWorldBorderCollision(CollisionView collisionView, Entity entity) {
-        Box box = entity.getBoundingBox();
-        WorldBorder worldBorder = collisionView.getWorldBorder();
-        return worldBorder.canCollide(entity, box) ? worldBorder.asVoxelShape() : null;
-    }
-
-    public static VoxelShape getCollisionShapeBelowEntity(World world, @Nullable Entity entity, Box entityBoundingBox) {
-        int x = MathHelper.floor(entityBoundingBox.minX + (entityBoundingBox.maxX - entityBoundingBox.minX) / 2);
-        int y = MathHelper.floor(entityBoundingBox.minY);
-        int z = MathHelper.floor(entityBoundingBox.minZ + (entityBoundingBox.maxZ - entityBoundingBox.minZ) / 2);
-        if (world.isOutOfHeightLimit(y)) {
-            return null;
-        }
-        Chunk chunk = world.getChunk(Pos.ChunkCoord.fromBlockCoord(x), Pos.ChunkCoord.fromBlockCoord(z), ChunkStatus.FULL, false);
-        if (chunk != null) {
-            ChunkSection cachedChunkSection = chunk.getSectionArray()[Pos.SectionYIndex.fromBlockCoord(world, y)];
-            return cachedChunkSection.getBlockState(x & 15, y & 15, z & 15).getCollisionShape(world, new BlockPos(x, y, z), entity == null ? ShapeContext.absent() : ShapeContext.of(entity));
-        }
-        return null;
+        return shapes.stream();
     }
 }

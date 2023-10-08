@@ -1,163 +1,131 @@
-import net.fabricmc.loom.task.RemapJarTask
+buildscript {
+    repositories {
+        jcenter()
+        maven {
+            name = "Fabric"
+            url = "https://maven.fabricmc.net/"
+        }
+        maven {
+            name = "Forge"
+            url = "https://files.minecraftforge.net/maven/"
+        }
+        maven {
+            name = "Jitpack"
+            url 'https://jitpack.io/'
+        }
+    }
+    dependencies {
+        classpath 'com.github.Chocohead:fabric-loom:e5d69cb'
+    }
+}
 
 plugins {
-    id 'fabric-loom' version '1.3-SNAPSHOT'
-
-    // Vineflower is a fork of the FernFlower decompiler which contains many enhancements and bug fixes, and generally
-    // produces much better source code. The Minecraft sources can be decompiled using it with the
-    // "genSourcesWithVineflower" task.
-    // (Note: Quiltflower was renamed to Vineflower in early July 2023.)
-    id 'io.github.juuxel.loom-vineflower' version '1.11.0'
-
-    // This dependency is only used to determine the state of the Git working tree so that build artifacts can be
-    // more easily identified. TODO: Lazily load GrGit via a service only when builds are performed.
-    id 'org.ajoberstar.grgit' version '5.0.0'
-
-    // Mixin config plugin is a subproject for creating lithium's settings from annotations in each mixin package.
-    id 'net.caffeinemc.mixin-config-plugin' version '1.0-SNAPSHOT'
+    id "com.matthewprenger.cursegradle" version "1.4.0"
 }
 
-apply from: "${rootProject.projectDir}/gradle/fabric.gradle"
-apply from: "${rootProject.projectDir}/gradle/java.gradle"
+apply plugin: "fabric-loom"
+import net.fabricmc.loom.task.RemappingJar;
 
-apply plugin: 'net.caffeinemc.mixin-config-plugin'
+sourceCompatibility = JavaVersion.VERSION_1_8
+targetCompatibility = JavaVersion.VERSION_1_8
 
-loom {
-    accessWidenerPath = file("src/main/resources/lithium.accesswidener")
-    mixin.defaultRefmapName = "mixins.lithium.refmap.json"
-}
-
+archivesBaseName = "${project.archives_base_name}-mc${project.minecraft_version}"
 group = project.maven_group
-version = "${project.mod_version}${getVersionMetadata()}"
-archivesBaseName = "${project.name}-mc${project.minecraft_version}"
+version = project.mod_version
 
-sourceSets {
-    api {
-        java {
-            compileClasspath += main.compileClasspath
-        }
-    }
+def build_release = System.getenv("BUILD_RELEASE") == "true"
+def build_id = System.getenv("BUILD_ID")
 
-    main {
-        java {
-            compileClasspath += api.output
-            runtimeClasspath += api.output
-        }
-    }
+if (!build_release) {
+    version += "-SNAPSHOT"
 }
 
-tasks.register('apiJar', Jar) {
-    archiveClassifier.set "api-dev"
-
-    from sourceSets.api.output
+if (build_id != null) {
+    version += "+build.${build_id}"
 }
-
-tasks.register('remapApiJar', RemapJarTask) {
-    dependsOn apiJar
-    archiveClassifier.set("api")
-
-    input = apiJar.archiveFile.get().asFile
-    addNestedDependencies = false
-}
-
-build.dependsOn remapApiJar
-
-jar {
-    from sourceSets.api.output.classesDirs
-    from sourceSets.api.output.resourcesDir
-}
-
-loom {
-    runs {
-        testmodServer {
-            runDir("testserver");
-            server()
-            ideConfigGenerated project.rootProject == project
-            source sourceSets.main
-        }
-        autoTestServer {
-            runDir("testserver");
-            inherit testmodServer
-            vmArg "-Dfabric.autoTest"
-        }
-    }
-}
-
-
 
 repositories {
-    allprojects {
-        repositories {
-            maven { url 'https://jitpack.io' }
-        }
-    }
+    // Fabric-ASM
+    maven { url 'https://jitpack.io' }
 }
+
+minecraft {
+    refmapName = "mixins.lithium.refmap.json"
+    AT = file("src/main/resources/access-transformers.txt")
+}
+
 
 dependencies {
-    //to change the versions see the gradle.properties file
-    minecraft "com.mojang:minecraft:${project.minecraft_version}"
-    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+	//to change the versions see the gradle.properties file
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+	modCompile "net.fabricmc:fabric-loader:${project.loader_version}"
 
-    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
-    modImplementation 'com.github.2No2Name:McTester:v0.3.4'
+    include "com.moandjiezana.toml:toml4j:0.7.2"
+    compile "com.moandjiezana.toml:toml4j:0.7.2"
 
-    Set<String> fabricApiModulesCompileOnly = [
-            "fabric-transfer-api-v1"
-    ]
-    // Add each fabric api module as a compile only dependency
-     fabricApiModulesCompileOnly.forEach {
-        modCompileOnly(fabricApi.module(it, "${project.fabric_version}"))
-    }
-
-    compileOnly 'net.caffeinemc:mixin-config-plugin:1.0-SNAPSHOT'
+    include "com.github.Chocohead:Fabric-ASM:${project.fabric_asm_version}"
+    compile "com.github.Chocohead:Fabric-ASM:${project.fabric_asm_version}:dev"
 }
 
-createMixinConfig {
-    inputFiles = file(compileJava.getDestinationDirectory())
-    includeFiles = file("src/main/java/me/jellysquid/mods/lithium")
-    outputDirectory = file("src/main/resources/assets/lithium/")
-    outputDirectoryForSummaryDocument = file(".")
-    mixinParentPackage = "me.jellysquid.mods.lithium"
-    modShortName = "Lithium"
+processResources {
+	inputs.property "version", project.version
+
+	from(sourceSets.main.resources.srcDirs) {
+		include "fabric.mod.json"
+
+		expand "version": project.version
+	}
+
+	from(sourceSets.main.resources.srcDirs) {
+		exclude "fabric.mod.json"
+	}
 }
 
-jar.dependsOn createMixinConfig
-processResources.dependsOn createMixinConfig
-createMixinConfig.dependsOn compileJava
+// ensure that the encoding is set to UTF-8, no matter what the system default is
+// this fixes some edge cases with special characters not displaying correctly
+// see http://yodaconditions.net/blog/fix-for-java-file-encoding-problems-with-gradle.html
+tasks.withType(JavaCompile) {
+	options.encoding = "UTF-8"
+}
 
-def getVersionMetadata() {
-    def build_release = System.getenv("BUILD_RELEASE") == "true"
-    // CI builds only
-    if (build_release) {
-        return "" // no tag whatsoever
-    }
+// Loom will automatically attach sourcesJar to a RemapSourcesJar task and to the "build" task
+// if it is present.
+// If you remove this task, sources will not be generated.
+task sourcesJar(type: Jar, dependsOn: classes) {
+    classifier = "sources"
+    from sourceSets.main.allSource
+    from "LICENSE"
+}
 
-    if (grgit != null) {
-        def head = grgit.head()
-        def id = head.abbreviatedId
+task modJar(type: RemappingJar, dependsOn: classes) {
+    from sourceSets.main.output
+    from "LICENSE"
+}
 
-        // Flag the build if the build tree is not clean
-        if (!grgit.status().clean) {
-            id += "-dirty"
+build.dependsOn modJar
+
+def cf_api_token = System.getenv("CF_API_TOKEN")
+
+curseforge {
+    // If the environment variable does not exist,
+    apiKey cf_api_token == null ? "" : cf_api_token
+
+    project {
+        id = project.cf_project_id
+        releaseType = 'beta'
+
+        addGameVersion project.cf_game_version
+
+        def displayNameBase = "${project.cf_project_name} mc${project.minecraft_version}-${project.version}"
+
+        mainArtifact(modJar) {
+            displayName = displayNameBase
         }
-
-        return "+git.${id}"
     }
 
-    // No tracking information could be found about the build
-    return "+unknown"
-}
-
-//make builds more reproducible
-tasks.withType(AbstractArchiveTask) {
-    reproducibleFileOrder = true
-    preserveFileTimestamps = false
-}
-
-//Mixin hotswap
-afterEvaluate {
-    loom.runs.configureEach {
-        // https://fabricmc.net/wiki/tutorial:mixin_hotswaps
-        vmArg "-javaagent:${ configurations.compileClasspath.find { it.name.contains("sponge-mixin") } }"
+    options {
+        javaIntegration = false
+        forgeGradleIntegration = false
     }
 }
