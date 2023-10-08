@@ -13,6 +13,9 @@ in order to provide better overall performance. It works on both the **client an
 :warning: **Lithium is still in an early stage of development.** This mod contains a large number of patches which may cause issues in your game. Please be prepared
 to edit your configuration file to narrow down issues. If you do run into an issue, please let me know through opening an issue!
 
+## FORK CHANGE NOTES
+This fork is unofficial! Please do not contact jellysquid if you encounter errors. This mod's ccode has been changed to make it compatible with 20w14infinite.
+
 ### Support development
 
 You can help buy me food and support development while getting early access builds of my mods by [making a monthly pledge to my Patreon!](https://patreon.com/jellysquid) You'll also gain some special perks, such as prioritized support on [my Discord server](https://discord.gg/kcb57Cm).
